@@ -9,7 +9,7 @@ import java.nio.file.*
 
 internal class Platform(
     val name: String,
-    val protect: String,
+    val id: String,
     val comment: String
 )
 
@@ -101,7 +101,8 @@ internal class Field(
         it?.splitToSequence(",") ?: emptySequence()
     }
 
-    val optional: String? get() = attribs["optional"]
+    //According to the OpenXR spec 'Any structure containing a void* next member must have a value of next that is either NULL, or...', however in xr.xml 'next' fields are not marked as optional so we have to create an exception for it
+    val optional: String? get() = attribs["optional"] ?: if (name == "next" && type == "void" && indirection == ".p") "true" else null
     val externsync: String? get() = attribs["externsync"]
     val noautovalidity: String? get() = attribs["noautovalidity"]
     //val validextensionstructs: String? get() = attribs["validextensionstructs"]
@@ -179,7 +180,7 @@ internal class SPIRVCapability(
 )
 
 internal class Registry(
-    val platforms: List<Platform>,
+    val vendorids: List<Platform>,
     val tags: List<Tag>,
     val types: List<Type>,
     val enums: List<Enums>,
@@ -297,7 +298,7 @@ internal class TypeConverter : Converter {
             val name = reader.getAttribute("name")
             val requires = reader.getAttribute("requires")
             return if (name != null && requires != null) {
-                if ("vk_platform" == requires)
+                if ("openxr_platform_defines" == requires)
                     TypePlatform(name)
                 else
                     TypeSystem(requires, name)
@@ -313,7 +314,7 @@ internal class TypeConverter : Converter {
                     reader.moveDown()
                     val name = reader.value
                     reader.moveUp()
-                    if (name.startsWith("VK_")) {
+                    if (name.startsWith("XR_")) {
                         TypeIgnored
                     } else {
                         TypePlatform(name)
@@ -339,7 +340,7 @@ internal class TypeConverter : Converter {
                 TypeBase(type, name)
             }
             "bitmask"     -> {
-                val requires = reader.getAttribute("requires")
+                val requires = reader.getAttribute("bitvalues")
 
                 var name = reader.getAttribute("name")
                 val t = if (name == null) {
@@ -417,6 +418,11 @@ internal class TypeConverter : Converter {
             "struct"      -> {
                 val alias = reader.getAttribute("alias")
                 val name = reader.getAttribute("name")
+                val protect = reader.getAttribute("protect")
+
+                if (protect == "XR_USE_PLATFORM_XCB") {
+                    return TypeIgnored
+                }
 
                 val t = if (alias == null) {
                     val returnedonly = reader.getAttribute("returnedonly") != null
@@ -448,9 +454,9 @@ internal fun parse(registry: Path) = XStream(Xpp3Driver()).let { xs ->
     xs.alias("registry", Registry::class.java)
 
     Platform::class.java.let {
-        xs.alias("platform", it)
+        xs.alias("vendorid", it)
         xs.useAttributeFor(it, "name")
-        xs.useAttributeFor(it, "protect")
+        xs.useAttributeFor(it, "id")
         xs.useAttributeFor(it, "comment")
     }
 

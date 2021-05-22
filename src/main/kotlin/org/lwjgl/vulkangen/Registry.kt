@@ -9,16 +9,15 @@ import java.nio.file.*
 import kotlin.system.*
 
 internal val DISABLED_EXTENSIONS = setOf(
-    "VK_ANDROID_external_memory_android_hardware_buffer",
-    "VK_EXT_directfb_surface",
-    "VK_FUCHSIA_imagepipe_surface",
-    "VK_GGP_frame_token",
-    "VK_GGP_stream_descriptor_surface",
-    "VK_KHR_android_surface",
-    "VK_KHR_xcb_surface",
-    "VK_MVK_ios_surface",
-    "VK_NN_vi_surface",
-    "VK_QNX_screen_surface",
+    "XR_KHR_android_surface_swapchain",
+    "XR_KHR_D3D11_enable",
+    "XR_KHR_D3D12_enable",
+    "KHRWin32ConvertPerformanceCounterTime",
+    //TODO find how to map unknwn.h to enable these extensions
+    "XR_MSFT_holographic_window_attachment",
+    "XR_MSFT_perception_anchor_interop",
+    //TODO find how to map time.h to enable this extension
+    "XR_KHR_convert_timespec_time"
 )
 
 private val ABBREVIATIONS = setOf(
@@ -44,7 +43,13 @@ private val IMPORTS = mapOf(
     "wayland-client.h" to "org.lwjgl.system.linux.*",
     "windows.h" to "org.lwjgl.system.windows.*",
     "X11/Xlib.h" to "org.lwjgl.system.linux.*",
-    "X11/extensions/Xrandr.h" to "org.lwjgl.system.linux.*"
+    "X11/extensions/Xrandr.h" to "org.lwjgl.system.linux.*",
+
+    //OpenXR exclusive mappings
+    "vulkan/vulkan.h" to "org.lwjgl.vulkan.*",
+    "GL/wglext.h" to null,
+    "GL/glxext.h" to null,
+    "EGL/egl.h" to null
 )
 
 private const val HEADER = """/*
@@ -57,7 +62,6 @@ private const val HEADER = """/*
 // Character sequence used for alignment
 internal const val t = "    "
 
-private const val S = "\$"
 private const val QUOTES3 = "\"\"\""
 
 internal class LWJGLWriter(out: Writer) : PrintWriter(out) {
@@ -79,14 +83,13 @@ fun main(args: Array<String>) {
     val vulkanDocs = Paths.get(args[0]).toAbsolutePath().normalize()
     val registry = vulkanDocs.let {
         require(Files.isDirectory(it)) {
-            "Invalid Vulkan-Docs repository path specified: $it"
+            "Invalid OpenXR-SDK repository path specified: $it"
         }
 
-        val registryPath = it.resolve("xml/vk.xml")
+        val registryPath = it.resolve("specification\\registry\\xr.xml")
         require(Files.isRegularFile(registryPath)) {
-            "The path specified does not contain the Vulkan-Docs repository: $it"
+            "The path specified does not contain the OpenXR-SDK repository: $it"
         }
-
         parse(registryPath)
     }
 
@@ -96,7 +99,7 @@ fun main(args: Array<String>) {
             "Invalid lwjgl3 repository path specified: $it"
         }
 
-        val root = lwjgl3.resolve("modules/lwjgl/vulkan/src/templates/kotlin/vulkan")
+        val root = lwjgl3.resolve("modules/lwjgl/openxr/src/templates/kotlin/openxr")
         require(Files.isDirectory(root)) {
             "The path specified does not contain the lwjgl3 repository: $it"
         }
@@ -137,17 +140,17 @@ fun main(args: Array<String>) {
             )
         }
 
-    try {
-        convert(vulkanDocs, structs)
-    } catch (e: Exception) {
-        e.printStackTrace()
-        exitProcess(-1)
-    }
+//    try {
+//        convert(vulkanDocs, structs)
+//    } catch (e: Exception) {
+//        e.printStackTrace()
+//        exitProcess(-1)
+//    }
 
     // TODO: This must be fixed post Vulkan 1.0. We currently have no other way to identify types used in core only.
 
     val featureTypes = getDistinctTypes(registry.features.asSequence().flatMap { it.requires.asSequence() }, commands, types)
-    generateTypes(root, "VKTypes", types, structs, featureTypes) {
+    generateTypes(root, "XRTypes", types, structs, featureTypes) {
         registry.tags.asSequence()
             .map { "const val ${it.name} = \"${it.name}\"" }
             .joinToString("\n", postfix = "\n\n")
@@ -197,7 +200,7 @@ fun main(args: Array<String>) {
 /*
 The sequence order here is important: We return the types in the order we encounter them in the API
 (function return type first, function param types later, etc). Doing it this way matches the order
-in <vulkan.h>.
+in <vulkan.h> or <openxr.h>.
  */
 private fun getDistinctTypes(
     requires: Sequence<Require>,
@@ -325,7 +328,7 @@ else {
         val isString = param.len.contains("null-terminated") || (param.array != null && param.type == "char")
         val type = getParamType(param, indirection, hasConst, check.any(),
             if (isString) {
-                if (returns.type == "PFN_vkVoidFunction") "ASCII" else "UTF8"
+                if (returns.type == "PFN_xrVoidFunction") "ASCII" else "UTF8"
             } else ""
         ).let {
             if (function !is TypeFuncpointer || nativeType !is TypeStruct) {
@@ -342,9 +345,13 @@ else {
 
 private fun getJavaImports(types: Map<String, Type>, fields: Sequence<Field>) = fields
     .mapNotNull {
-        if (it.array != null && (it.array.startsWith("\"VK_MAX_") || it.array == "\"VK_UUID_SIZE\""))
-            "static org.lwjgl.vulkan.VK10.*"
-        else {
+        // TODO: find extension that defines the array value, not everything is in XX10 (see VkPhysicalDeviceDriverPropertiesKHR or XrControllerModelNodePropertiesMSFT)
+
+        if (it.array != null && (it.array.startsWith("\"XR_MAX_") || it.array == "VK_UUID_SIZE")) {
+            "static org.lwjgl.openxr.XR10.*"
+        } else if (it.array == "XR_MAX_CONTROLLER_MODEL_NODE_NAME_SIZE_MSFT") {
+            "static org.lwjgl.openxr.MSFTControllerModel.*"
+        } else {
             val type = types[it.type]
             if (type is TypeSystem)
                 IMPORTS[type.requires]
@@ -377,18 +384,24 @@ private fun generateTypes(
             .toHashSet()
 
         writer.print(HEADER)
-        writer.print("""package vulkan
+        writer.print("""package openxr
 
 import org.lwjgl.generator.*${if (templateTypes.any { it is TypeSystem }) """
 //import core.android.*
 import core.linux.*
 import core.macos.*
-import core.windows.*""" else ""}
+import core.windows.*
+import vulkan.*
+import egl.*
+import opengl.*""" else ""
+        }
 
 ${if (custom != null) custom() else ""}// Handle types
-${templateTypes.asSequence()
-            .filterIsInstance<TypeHandle>()
-            .joinToString("\n") { "val ${it.name} = ${it.type}(\"${it.name}\")" }}
+${
+            templateTypes.asSequence()
+                .filterIsInstance<TypeHandle>()
+                .joinToString("\n") { "val ${it.name} = ${it.type}(\"${it.name}\")" }
+        }
 
 // Enum types
 ${templateTypes.asSequence()
@@ -398,7 +411,7 @@ ${templateTypes.asSequence()
 // Bitmask types
 ${templateTypes.asSequence()
             .filterIsInstance<TypeBitmask>()
-            .joinToString("\n") { "val ${it.name} = typedef(VkFlags, \"${it.name}\")" }}
+            .joinToString("\n") { "val ${it.name} = typedef(XrFlags, \"${it.name}\")" }}
 
 ${templateTypes.asSequence()
             .filterIsInstance<TypeFuncpointer>()
@@ -415,7 +428,7 @@ ${templateTypes.asSequence()
                         }
                     }
                     .joinToString("\n") {
-                        "val _${it.name} = ${it.type}(Module.VULKAN, \"${it.name}\")"
+                        "val _${it.name} = ${it.type}(Module.OPENXR, \"${it.name}\")"
                     }.let {
                         if (it.isEmpty()) {
                             it
@@ -425,7 +438,7 @@ ${templateTypes.asSequence()
                     }
 
                 val functionDoc = FUNCTION_DOC[fp.name]
-                """${structTypes}val ${fp.name} = Module.VULKAN.callback {
+                """${structTypes}val ${fp.name} = Module.OPENXR.callback {
     ${getReturnType(fp.proto)}(
         "${fp.name.substring(4).let { "${it[0].toUpperCase()}${it.substring(1)}" }}",
         "${functionDoc?.shortDescription ?: ""}"${getParams(fp, FUNCTION_DOC[fp.proto.name], types, structs, forceIN = true, indent = "$t$t")},
@@ -451,44 +464,51 @@ ${templateTypes.asSequence()
 $it
 
 """ else ""
-            }}// Struct types
-${templateTypes.asSequence()
-            .filterIsInstance<TypeStruct>()
-            .joinToString("\n\n") { struct ->
-                structDefinitions.add(struct.name)
+                }
+        }// Struct types
+${
+            templateTypes.asSequence()
+                .filterIsInstance<TypeStruct>()
+                .joinToString("\n\n") { struct ->
+                    structDefinitions.add(struct.name)
 
-                var aliasForwardDecl: String? = null
-                var alias: String? = null
-                struct.alias.let {
-                    if (it != null) {
-                        if (!structDefinitions.contains(it) && forwardDeclarations.none { decl -> decl.name == it } && structInTemplate.contains(it)) {
-                            aliasForwardDecl = "val _$it = ${struct.type}(Module.VULKAN, \"${struct.alias}\")\n"
-                            alias = ", alias = _$it"
-                        } else {
-                            alias = ", alias = $it"
+                    var aliasForwardDecl: String? = null
+                    var alias: String? = null
+                    struct.alias.let {
+                        if (it != null) {
+                            if (!structDefinitions.contains(it) && forwardDeclarations.none { decl -> decl.name == it } && structInTemplate.contains(it)) {
+                                aliasForwardDecl = "val _$it = ${struct.type}(Module.OPENXR, \"${struct.alias}\")\n"
+                                alias = ", alias = _$it"
+                            } else {
+                                alias = ", alias = $it"
+                            }
                         }
                     }
-                }
 
-                val structDoc = STRUCT_DOC[struct.name]
+                    val structDoc = STRUCT_DOC[struct.name]
 
-                """${aliasForwardDecl ?: ""}${
-                if (struct.members.any { it.type == struct.name }) "val _${struct.name} = ${struct.type}(Module.VULKAN, \"${struct.name}\")\n" else ""
-                }val ${struct.name} = ${struct.type}(Module.VULKAN, "${struct.name}"${
-                if (struct.returnedonly) ", mutable = false" else ""
-                }${alias ?: ""}) {
-    ${getJavaImports(types, struct.members.asSequence())}${if (structDoc == null) {
-                    if (struct.alias == null) "" else """documentation = "See ##${struct.alias}."
+                    """${aliasForwardDecl ?: ""}${
+                        if (struct.members.any { it.type == struct.name }) "val _${struct.name} = ${struct.type}(Module.OPENXR, \"${struct.name}\")\n" else ""
+                    }val ${struct.name} = ${struct.type}(Module.OPENXR, "${struct.name}"${
+                        if (struct.returnedonly) ", mutable = false" else ""
+                    }${alias ?: ""}) {
+    ${getJavaImports(types, struct.members.asSequence())}${
+                        if (structDoc == null) {
+                            if (struct.alias == null) "" else """documentation = "See ##${struct.alias}."
 
     """
-                } else
-                    """documentation =
+                        } else
+                            """documentation =
         $QUOTES3
-        ${structDoc.shortDescription}${if (structDoc.description.isEmpty()) "" else """
+        ${structDoc.shortDescription}${
+                                if (structDoc.description.isEmpty()) "" else """
 
-        ${structDoc.description}${if (structDoc.seeAlso == null) "" else """
+        ${structDoc.description}${
+                                    if (structDoc.seeAlso == null) "" else """
 
-        ${structDoc.seeAlso}"""}"""}
+        ${structDoc.seeAlso}"""
+                                }"""
+                            }
         $QUOTES3
 
     """}${struct.members.asSequence()
@@ -516,7 +536,7 @@ ${templateTypes.asSequence()
                                 struct.members.asSequence()
                                     .filter { it.len.contains(len) }
                                     .count() > 1
-                            })) && (member.indirection.isNotEmpty() || types.getValue(member.type).let { it is TypeFuncpointer || (it is TypeHandle && it.type == "VK_DEFINE_HANDLE") })) "nullable.." else ""
+                            })) && (member.indirection.isNotEmpty() || types.getValue(member.type).let { it is TypeFuncpointer || (it is TypeHandle && it.type == "XR_DEFINE_HANDLE") })) "nullable.." else ""
 
                         val hasConst = member.modifier == "const"
                         val type = getParamType(member, member.indirection, hasConst, false,
@@ -525,13 +545,17 @@ ${templateTypes.asSequence()
                             if (member.type == struct.name) "_$it" else it
                         }
 
-                        "$autoSize$nullable$type(\"${member.name}\", \"${structDoc?.members?.get(member.name) ?: ""}\"${if (member.bits == null) "" else ", bits = ${member.bits}"})${
-                        if (member.array != null) "[${member.array}]" else ""
-                        }${
-                        if (struct.returnedonly && (member.name == "sType" || member.name == "pNext")) ".mutable()" else ""
-                        }"
+                                "$autoSize$nullable$type(\"${member.name}\", \"${structDoc?.members?.get(member.name) ?: ""}\")${
+//                        if (member.array != null) "[${member.array}]" } else " \/ is tmp fix until documentation is set up
+                                    if (member.array != null) {
+                                        if (member.array.toDoubleOrNull() == null && !member.array.startsWith("\"")) "[\"${member.array}\"]" else "[${member.array}]"
+                                    } else ""
+                                }${
+                                    if (struct.returnedonly && (member.name == "sType" || member.name == "pNext")) ".mutable()" else ""
+                                }"
+                            }
+                            .joinToString("\n$t")
                     }
-                    .joinToString("\n$t")}
 }"""
             }}""")
     }
@@ -546,55 +570,62 @@ private fun generateFeature(
     feature: Feature,
     enumsSeen: MutableSet<Enums>
 ) {
-    val template = "VK${feature.number.substringBefore('.')}${feature.number.substringAfter('.')}"
+    val template = "XR${feature.number.substringBefore('.')}${feature.number.substringAfter('.')}"
     val file = root.resolve("templates/$template.kt")
 
     LWJGLWriter(OutputStreamWriter(Files.newOutputStream(file), Charsets.UTF_8)).use { writer ->
         val distinctTypes = getDistinctTypes(feature.requires.asSequence(), commands, types)
 
         writer.print(HEADER)
-        writer.print("""package vulkan.templates
+        writer.print("""package openxr.templates
 
-import org.lwjgl.generator.*${distinctTypes.asSequence()
-            .filterIsInstance<TypeSystem>()
-            .map { it.requires }
-            .distinct()
-            .map { "\nimport ${IMPORTS.getValue(it).replace("org.lwjgl.system.", "core.")}" }
-            .distinct()
-            .joinToString()
+import org.lwjgl.generator.*${
+            distinctTypes.asSequence()
+                .filterIsInstance<TypeSystem>()
+                .map { it.requires }
+                .distinct()
+                .map { val s = IMPORTS.getValue(it)?.replace("org.lwjgl.system.", "core.")?.replace("org.lwjgl.", ""); if (s != null) "\nimport $s" else "" }
+                .distinct()
+                .joinToString("")
         }
-import vulkan.*
+import openxr.*
 
-val $template = "$template".nativeClass(Module.VULKAN, "$template", prefix = "VK", binding = VK_BINDING_INSTANCE) {
-    ${if (feature.number != "1.0") /* TODO: */"extends = VK10\n    " else ""}documentation =
+val $template = "$template".nativeClass(Module.OPENXR, "$template", prefix = "XR", binding = XR_BINDING_INSTANCE) {
+    ${if (feature.number != "1.0") /* TODO: */ "extends = XR10\n    " else ""}documentation =
         $QUOTES3
-        The core Vulkan ${feature.number} functionality.
+        The core OpenXR ${feature.number} functionality.
         $QUOTES3
 """)
         feature.requires.asSequence()
             .mapNotNull { it.enums }
             .forEach { enums ->
                 enums.asSequence()
-                    .filter { it.extends != null && (it.value == null || !it.value.startsWith("VK_")) }
+                    .filter { it.extends != null && (it.value == null || !it.value.startsWith("XR_")) }
                     .groupBy { it.extends!! }
                     .forEach { (enumName, enumList) ->
                         val extends = enumList.firstOrNull { it.extends != null }?.extends
                         val enumDoc = ENUM_DOC[enumName]
                         writer.println("""
     EnumConstant(
-        ${when {
-                            extends != null -> "\"Extends {@code $enumName}.\""
-                            enumDoc == null -> "\"$enumName\""
-                            else            -> """"$QUOTES3
+        ${
+                            when {
+                                extends != null -> "\"Extends {@code $enumName}.\""
+                                enumDoc == null -> "\"$enumName\""
+                                else            -> """"$QUOTES3
         ${enumDoc.shortDescription}${
-                            if (enumDoc.description.isEmpty()) "" else "\n\n$t$t${enumDoc.description}"}${
-                            if (enumDoc.seeAlso.isEmpty()) "" else "\n\n$t$t${enumDoc.seeAlso}"}
+                                    if (enumDoc.description.isEmpty()) "" else "\n\n$t$t${enumDoc.description}"
+                                }${
+                                    if (enumDoc.seeAlso.isEmpty()) "" else "\n\n$t$t${enumDoc.seeAlso}"
+                                }
         $QUOTES3"""
-                        }},
+                            }
+                        },
 
-        ${enumList.asSequence()
-                            .map { "\"${it.name.substring(3)}\".${it.getEnumValue(it.extnumber ?: 0, enumRegistry)}" }
-                            .joinToString(",\n$t$t")}
+        ${
+                            enumList.asSequence()
+                                .map { "\"${it.name.substring(3)}\".${it.getEnumValue(it.extnumber ?: 0, enumRegistry)}" }
+                                .joinToString(",\n$t$t")
+                        }
     )""")
                     }
             }
@@ -613,7 +644,7 @@ val $template = "$template".nativeClass(Module.VULKAN, "$template", prefix = "VK
             .forEach {
                 if (it.commands != null) {
                     writer.println("\n$t// ${it.comment}")
-                    writer.printCommands(it.commands.asSequence().map { commandRef -> commandRef.name }, types, structs, commands)
+                    writer.printCommands(it, types, structs, commands)
                 }
             }
 
@@ -636,24 +667,26 @@ private fun generateExtension(
 
     LWJGLWriter(OutputStreamWriter(Files.newOutputStream(file), Charsets.UTF_8)).use { writer ->
         val distinctTypes = getDistinctTypes(extension.requires.asSequence(), commands, types)
-
+        val postfix = name.substringBefore('_')
         writer.print(HEADER)
-        writer.print("""package vulkan.templates
+        writer.print("""package openxr.templates
 
-import org.lwjgl.generator.*${distinctTypes.asSequence()
-            .filterIsInstance<TypeSystem>()
-            .map { it.requires }
-            .distinct()
-            .map { "\nimport ${IMPORTS.getValue(it).replace("org.lwjgl.system.", "core.")}" }
-            .distinct()
-            .joinToString()
+import org.lwjgl.generator.*${
+            distinctTypes.asSequence()
+                .filterIsInstance<TypeSystem>()
+                .map { it.requires }
+                .distinct()
+                .map { val s = IMPORTS.getValue(it)?.replace("org.lwjgl.system.", "core.")?.replace("org.lwjgl.", ""); if (s != null) "\nimport $s" else ""}
+                .distinct()
+                .joinToString("")
         }
-import vulkan.*
+import openxr.*
+import openxr.$postfix as ${postfix}_XR
 
-val $name = "${name.template}".nativeClassVK("$name", type = "${extension.type}", postfix = ${name.substringBefore('_')}) {
+val $name = "${name.template}".nativeClassXR("$name", type = "${extension.type}", postfix = ${postfix}_XR) {
     documentation =
         $QUOTES3
-        ${EXTENSION_DOC[name] ?: "The ${S}templateName extension."}
+        ${EXTENSION_DOC[name] ?: "The \$templateName extension."}
         $QUOTES3
 """)
 
@@ -661,7 +694,7 @@ val $name = "${name.template}".nativeClassVK("$name", type = "${extension.type}"
             .mapNotNull { it.enums }
             .forEach { enums ->
                 enums.asSequence()
-                    .filter { it.value == null || !it.value.startsWith("VK_") }
+                    .filter { it.value == null || !it.value.startsWith("XR_") }
                     .groupBy { it.extends ?: it.name }
                     .forEach nextEnumList@{ (enumName, enumList) ->
                         if (enumList.size == 1) {
@@ -715,38 +748,9 @@ val $name = "${name.template}".nativeClassVK("$name", type = "${extension.type}"
             writer.printEnums(extensionEnums, extension.number, enumRegistry)
         }
 
-        // Merge multiple dependencies (in different <require>) for the same command
-        val dependencies = HashMap<String, String>()
         extension.requires.forEach { require ->
-            val dependency = require.extension ?: require.feature.let {
-                if (it == null) {
-                    null
-                } else {
-                    val (major, minor) = VK_VERSION_REGEX.find(it)!!.destructured
-                    "Vulkan$major$minor"
-                }
-            }
-            if (dependency != null && require.commands != null) {
-                require.commands.forEach { commandRef ->
-                    dependencies.merge(commandRef.name, dependency) { current, dependency ->
-                        when {
-                            current.startsWith("ext.contains") -> """$current || ext.contains("$dependency")"""
-                            else                               -> """ext.contains("$current") || ext.contains("$dependency")"""
-                        }
-                    }
-                }
-            }
+            writer.printCommands(require, types, structs, commands)
         }
-
-        writer.printCommands(
-            extension.requires.asSequence()
-                .filter { it.commands != null }
-                .flatMap { it.commands!!.asSequence() }
-                .map { it.name }
-                .distinct(),
-            types, structs, commands,
-            dependencies
-        )
 
         writer.print("}")
     }
@@ -800,36 +804,44 @@ private fun PrintWriter.printEnums(enums: List<Enums>, extensionNumber: Int, enu
         }
 }
 
+private val VERSION_REGEX = "(VK|XR)_VERSION_(\\d+)_(\\d+)".toRegex()
 private fun PrintWriter.printCommands(
-    commandRefs: Sequence<String>,
+    require: Require,
     types: Map<String, Type>,
     structs: Map<String, TypeStruct>,
-    commands: Map<String, Command>,
-    dependencies: Map<String, String>? = null
+    commands: Map<String, Command>
 ) {
-    commandRefs.forEach { commandRef ->
-        val cmd = commands.getValue(commandRef)
-        val name = commandRef.substring(2)
+    if (require.commands == null) {
+        return
+    }
+
+    // TODO: multiple require blocks may include the same command
+    //       In that case, the DependsOn modifier must be a logical OR of the corresponding requires
+    //       Output command only once of course.
+    val dependency = require.extension ?: require.feature.let {
+        if (it == null) {
+            null
+        } else {
+            val (major, minor) = VERSION_REGEX.find(it)!!.destructured
+            "Vulkan$major$minor"
+        }
+    }
+
+    require.commands.forEach { commandRef ->
+        val cmd = commands.getValue(commandRef.name)
+        val name = commandRef.name.substring(2)
+        val functionDoc = FUNCTION_DOC[name]
 
         print("\n$t")
-        // If we don't have a dispatchable handle, mark ICD-global
-        if (commandRef == "vkGetInstanceProcAddr" || cmd.params.none { param ->
-                param.indirection.isEmpty() && types.getValue(param.type).let { it is TypeHandle && it.type == "VK_DEFINE_HANDLE" }/* && param.optional != "true"*/
+        // If we don't have a dispatchable or atomic handle, mark ICD-global
+        if (commandRef.name == "xrGetInstanceProcAddr" || cmd.params.none { param ->
+                param.indirection.isEmpty() && types.getValue(param.type).let { it is TypeHandle && it.type == "XR_DEFINE_HANDLE" }
             }) {
             print("GlobalCommand..")
         }
-
-        dependencies?.get(commandRef).let {
-            if (it != null) {
-                print(if (it.startsWith("ext.contains"))
-                    "DependsOn(\"\"\"$it\"\"\").."
-                else
-                    "DependsOn(\"$it\").."
-                )
-            }
+        if (dependency != null) {
+            print("DependsOn(\"$dependency\")..")
         }
-
-        val functionDoc = FUNCTION_DOC[name]
         println("""${getReturnType(cmd.proto)}(
         "$name",
         ${if (functionDoc == null) {
